@@ -1,0 +1,63 @@
+      Generic Authentication API
+                     POST /login
+                           │
+                    Access Token (JWT)
+                           │
+                           ▼
+                Administration Ingestion API
+         ┌──────────────────────────────────────┐
+         │ Verify JWT (public.pem - RS256)      │
+         │                                      │
+         │ Validate Payload                     │
+         │                                      │
+         │ Read DB Schema (Startup Only)        │
+         │                                      │
+         │ Build Dynamic Table Mapping          │
+         │                                      │
+         │ Generic UPSERT Engine                │
+         │                                      │
+         │ PostgreSQL Transaction               │
+         └──────────────────────────────────────┘
+                           │
+                           ▼
+                  PostgreSQL (Administration)
+
+
+
+
+
+
+
+
+
+POST /api/v1/administration/ingest
+
+            │
+
+            ▼
+
+      Verify JWT
+
+            │
+
+            ▼
+
+      Validate Payload
+
+            │
+
+            ▼
+
+      Split Payload
+
+            │
+
+            ▼
+
+Generic Bulk UPSERT Engine
+
+            │
+
+            ▼
+
+     PostgreSQL Tables
