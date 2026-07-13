@@ -10,7 +10,7 @@ from app.utils.logger import logger
 settings = get_settings()
 
 router = APIRouter(
-    prefix="/api/v1/administration",
+    prefix="/api/v1",
     tags=["Administration Ingestion"]
 )
 

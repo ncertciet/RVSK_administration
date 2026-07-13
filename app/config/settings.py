@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     HOST: str
     PORT: int
+    ROOT_PATH: str = ""
     CORS_ALLOWED_ORIGINS: str = "*"
 
     DB_HOST: str
