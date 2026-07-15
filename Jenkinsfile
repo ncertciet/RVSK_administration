@@ -2,666 +2,383 @@ pipeline {
     agent any
 
     options {
-        // Jenkins normally performs an automatic checkout before the stages.
-        // We disable it because we have our own explicit Checkout stage.
-        skipDefaultCheckout(true)
-
-        // Prevent two deployments from running at the same time.
-        disableConcurrentBuilds()
-
         timestamps()
-
-        // Keep only the latest 20 Jenkins builds.
-        buildDiscarder(logRotator(numToKeepStr: '20'))
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(
+            numToKeepStr: '20',
+            artifactNumToKeepStr: '5'
+        ))
+        timeout(time: 30, unit: 'MINUTES')
     }
 
     environment {
-        // -------------------------------------------------
-        // Deployment Server
-        // -------------------------------------------------
-        DEPLOY_HOST = '10.249.160.101'
-        DEPLOY_USER = 'nvsk-dev-user'
+        APP_NAME       = 'rvsk_administration'
+        IMAGE_NAME     = 'rvsk-administration'
 
-        // -------------------------------------------------
-        // Application
-        // -------------------------------------------------
-        APP_DIR = '/home/nvsk-dev-user/RVSK_administration'
-        DEPLOY_BRANCH = 'dev_administration'
+        DEPLOY_USER    = 'ubuntu'
+        DEPLOY_HOST    = '10.249.96.115'
+        DEPLOY_DIR     = '/home/ubuntu/RVSK_administration'
 
-        // -------------------------------------------------
-        // Docker
-        // -------------------------------------------------
-        APP_NAME = 'rvsk_administration'
-        TEST_CONTAINER = 'rvsk_administration_test'
-        IMAGE_NAME = 'rvsk-administration'
+        HOST_PORT      = '8002'
+        CONTAINER_PORT = '8000'
 
-        // Keep the latest 5 commit-tagged Docker images.
-        IMAGES_TO_KEEP = '5'
+        HEALTH_URL     = 'http://127.0.0.1:8002/health'
+
+        KEEP_IMAGES    = '5'
     }
 
     stages {
 
-        // =================================================
-        // 1. CHECKOUT
-        // =================================================
-        stage('Checkout') {
+        stage('Checkout Main Branch') {
             steps {
-                checkout scm
+                checkout([
+                    $class: 'GitSCM',
+
+                    branches: [[
+                        name: '*/main'
+                    ]],
+
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/ncertciet/RVSK_administration.git'
+                    ]]
+                ])
+
+                script {
+                    env.COMMIT_ID = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    env.FULL_COMMIT_ID = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Production deployment commit: ${env.COMMIT_ID}"
+                }
             }
         }
 
-        // =================================================
-        // 2. DISPLAY BUILD INFORMATION
-        // =================================================
-        stage('Display Build Information') {
+        stage('Verify SSH Connection') {
             steps {
-                sh '''
-                    echo "========================================"
-                    echo "RVSK Administration Deployment"
-                    echo "========================================"
-                    echo "Jenkins Build Number : ${BUILD_NUMBER}"
-                    echo "Git Branch           : ${DEPLOY_BRANCH}"
-                    echo "Deployment Host      : ${DEPLOY_HOST}"
-                    echo "Application          : ${APP_NAME}"
-                    echo "========================================"
-                '''
-            }
-        }
-
-        // =================================================
-        // 3. TEST SSH CONNECTION
-        // =================================================
-        stage('Test SSH Connection') {
-            steps {
-                sh '''
+                sh """
                     ssh \
                       -o BatchMode=yes \
                       -o ConnectTimeout=10 \
                       ${DEPLOY_USER}@${DEPLOY_HOST} \
-                      "hostname && whoami && docker --version"
-                '''
+                      'hostname && whoami'
+                """
             }
         }
 
-        // =================================================
-        // 4. UPDATE SOURCE CODE ON DEPLOYMENT VM
-        // =================================================
-        stage('Update Source Code') {
+        stage('Verify Production Environment') {
             steps {
-                sh '''
+                sh """
                     ssh ${DEPLOY_USER}@${DEPLOY_HOST} '
                         set -e
 
-                        cd /home/nvsk-dev-user/RVSK_administration
+                        echo "Checking Docker..."
+                        docker --version
 
-                        echo "========================================"
-                        echo "Fetching latest source code..."
-                        echo "========================================"
+                        echo "Checking application directory..."
+                        test -d ${DEPLOY_DIR}
 
-                        git fetch origin
+                        echo "Checking production .env..."
+                        test -f ${DEPLOY_DIR}/.env
 
-                        echo "Switching to dev_administration..."
-                        git checkout dev_administration
+                        echo "Checking Dockerfile..."
+                        test -f ${DEPLOY_DIR}/Dockerfile
 
-                        echo "Resetting local repository to origin/dev_administration..."
-                        git reset --hard origin/dev_administration
-
-                        echo ""
-                        echo "Current Git commit:"
-                        git log -1 --oneline
-
-                        echo ""
-                        echo "Git status:"
-                        git status --short
+                        echo "Production environment verification successful."
                     '
-                '''
+                """
             }
         }
 
-        // =================================================
-        // 5. BUILD DOCKER IMAGE
-        // =================================================
+        stage('Update Production Source') {
+            steps {
+                sh """
+                    ssh ${DEPLOY_USER}@${DEPLOY_HOST} '
+                        set -e
+
+                        cd ${DEPLOY_DIR}
+
+                        echo "Fetching latest Git repository information..."
+                        git fetch origin main
+
+                        echo "Deploying exact Jenkins commit:"
+                        echo "${FULL_COMMIT_ID}"
+
+                        git checkout main
+                        git reset --hard ${FULL_COMMIT_ID}
+
+                        echo "Current deployed source commit:"
+                        git rev-parse --short HEAD
+
+                        echo "Verifying production .env still exists..."
+                        test -f .env
+                    '
+                """
+            }
+        }
+
         stage('Build Docker Image') {
             steps {
-                sh '''
+                sh """
                     ssh ${DEPLOY_USER}@${DEPLOY_HOST} '
                         set -e
 
-                        cd /home/nvsk-dev-user/RVSK_administration
+                        cd ${DEPLOY_DIR}
 
-                        COMMIT_ID=$(git rev-parse --short HEAD)
-
-                        echo "========================================"
-                        echo "Building Docker Image"
-                        echo "========================================"
-                        echo "Image: rvsk-administration:${COMMIT_ID}"
-                        echo "========================================"
+                        echo "Building Docker image:"
+                        echo "${IMAGE_NAME}:${COMMIT_ID}"
 
                         docker build \
-                          -t rvsk-administration:${COMMIT_ID} \
-                          -t rvsk-administration:latest \
+                          -t ${IMAGE_NAME}:${COMMIT_ID} \
                           .
 
-                        echo ""
-                        echo "Docker image built successfully."
-
-                        docker images rvsk-administration
+                        docker tag \
+                          ${IMAGE_NAME}:${COMMIT_ID} \
+                          ${IMAGE_NAME}:latest
                     '
-                '''
+                """
             }
         }
 
-        // =================================================
-        // 6. TEST NEW IMAGE ON TEMPORARY PORT 8001
-        // =================================================
-        stage('Test New Docker Image') {
-            steps {
-                sh '''
-                    ssh ${DEPLOY_USER}@${DEPLOY_HOST} '
-                        set -e
-
-                        cd /home/nvsk-dev-user/RVSK_administration
-
-                        COMMIT_ID=$(git rev-parse --short HEAD)
-                        TEST_CONTAINER="rvsk_administration_test"
-
-                        echo "========================================"
-                        echo "Testing New Docker Image"
-                        echo "========================================"
-                        echo "Image: rvsk-administration:${COMMIT_ID}"
-                        echo "Temporary Port: 8001"
-                        echo "========================================"
-
-                        # Remove any previous test container.
-                        docker rm -f "${TEST_CONTAINER}" 2>/dev/null || true
-
-                        echo "Starting temporary test container..."
-
-                        docker run -d \
-                          --name "${TEST_CONTAINER}" \
-                          --env-file /home/nvsk-dev-user/RVSK_administration/.env \
-                          -p 127.0.0.1:8001:8000 \
-                          rvsk-administration:${COMMIT_ID}
-
-                        echo ""
-                        echo "Waiting for application health check..."
-
-                        HEALTH_OK=0
-
-                        for i in 1 2 3 4 5 6; do
-
-                            echo "Health check attempt ${i}/6..."
-
-                            if curl \
-                                --fail \
-                                --silent \
-                                --show-error \
-                                http://127.0.0.1:8001/health
-                            then
-                                echo ""
-                                echo "Test container is healthy."
-                                HEALTH_OK=1
-                                break
-                            fi
-
-                            sleep 5
-                        done
-
-                        if [ "${HEALTH_OK}" -ne 1 ]; then
-
-                            echo ""
-                            echo "ERROR: Test container failed health check."
-
-                            echo ""
-                            echo "Test container logs:"
-                            docker logs "${TEST_CONTAINER}" || true
-
-                            docker rm -f "${TEST_CONTAINER}" || true
-
-                            exit 1
-                        fi
-
-                        echo ""
-                        echo "New Docker image passed pre-deployment testing."
-
-                        docker rm -f "${TEST_CONTAINER}"
-                    '
-                '''
-            }
-        }
-
-        // =================================================
-        // 7. DEPLOY WITH AUTOMATIC ROLLBACK
-        // =================================================
         stage('Deploy with Automatic Rollback') {
             steps {
-                sh '''
+                sh """
                     ssh ${DEPLOY_USER}@${DEPLOY_HOST} '
                         set -e
 
-                        cd /home/nvsk-dev-user/RVSK_administration
+                        cd ${DEPLOY_DIR}
 
-                        COMMIT_ID=$(git rev-parse --short HEAD)
+                        NEW_IMAGE="${IMAGE_NAME}:${COMMIT_ID}"
+                        APP_NAME="${APP_NAME}"
+                        BACKUP_NAME="${APP_NAME}_rollback"
 
-                        NEW_IMAGE="rvsk-administration:${COMMIT_ID}"
-                        APP_CONTAINER="rvsk_administration"
+                        echo "======================================"
+                        echo "Starting Production deployment"
+                        echo "New image: \$NEW_IMAGE"
+                        echo "======================================"
 
-                        echo "========================================"
-                        echo "Production Deployment"
-                        echo "========================================"
-                        echo "New Image: ${NEW_IMAGE}"
-                        echo "========================================"
+                        OLD_IMAGE=""
 
-                        # -----------------------------------------
-                        # Find currently deployed image
-                        # -----------------------------------------
+                        if docker inspect "\$APP_NAME" >/dev/null 2>&1; then
 
-                        CURRENT_IMAGE=$(docker inspect \
-                          --format="{{.Config.Image}}" \
-                          "${APP_CONTAINER}" \
-                          2>/dev/null || true)
+                            OLD_IMAGE=\$(docker inspect \
+                              --format="{{.Config.Image}}" \
+                              "\$APP_NAME")
 
-                        echo ""
-                        echo "Current production image: ${CURRENT_IMAGE}"
-                        echo "New production image    : ${NEW_IMAGE}"
+                            echo "Current image: \$OLD_IMAGE"
 
-                        # Save previous image information.
-                        if [ -n "${CURRENT_IMAGE}" ]; then
+                            docker rm -f "\$BACKUP_NAME" \
+                              >/dev/null 2>&1 || true
 
-                            echo "${CURRENT_IMAGE}" \
-                              > /tmp/rvsk_administration_previous_image
+                            docker rename \
+                              "\$APP_NAME" \
+                              "\$BACKUP_NAME"
 
-                            echo "Rollback image saved:"
-                            echo "${CURRENT_IMAGE}"
-
+                            docker stop \
+                              "\$BACKUP_NAME"
                         else
-
-                            echo "No existing production container found."
-
+                            echo "No existing container found."
                         fi
 
-                        # -----------------------------------------
-                        # Stop old production container
-                        # -----------------------------------------
+                        echo "Starting new Production container..."
 
-                        echo ""
-                        echo "Stopping existing production container..."
-
-                        docker rm -f "${APP_CONTAINER}" \
-                          2>/dev/null || true
-
-                        # -----------------------------------------
-                        # Start new production container
-                        # -----------------------------------------
-
-                        echo ""
-                        echo "Starting new production container..."
-
-                        if ! docker run -d \
-                          --name "${APP_CONTAINER}" \
+                        docker run -d \
+                          --name "\$APP_NAME" \
                           --restart unless-stopped \
-                          --env-file /home/nvsk-dev-user/RVSK_administration/.env \
-                          -p 8000:8000 \
-                          "${NEW_IMAGE}"
-                        then
-                            echo ""
-                            echo "ERROR: Failed to start new production container."
-                            DEPLOYMENT_FAILED=1
-                        else
-                            DEPLOYMENT_FAILED=0
-                        fi
+                          --env-file ${DEPLOY_DIR}/.env \
+                          -p 127.0.0.1:${HOST_PORT}:${CONTAINER_PORT} \
+                          "\$NEW_IMAGE"
 
-                        # -----------------------------------------
-                        # Production health check
-                        # -----------------------------------------
+                        echo "Waiting for application startup..."
 
-                        if [ "${DEPLOYMENT_FAILED}" -eq 0 ]; then
+                        HEALTHY=false
 
-                            echo ""
-                            echo "Waiting for production application..."
+                        for i in \$(seq 1 12); do
 
-                            PRODUCTION_HEALTH_OK=0
-
-                            for i in 1 2 3 4 5 6; do
-
-                                echo "Production health check attempt ${i}/6..."
-
-                                if curl \
-                                    --fail \
-                                    --silent \
-                                    --show-error \
-                                    http://127.0.0.1:8000/health
-                                then
-                                    echo ""
-                                    echo "New production container is healthy."
-                                    PRODUCTION_HEALTH_OK=1
-                                    break
-                                fi
-
-                                sleep 5
-                            done
-
-                            if [ "${PRODUCTION_HEALTH_OK}" -ne 1 ]; then
-                                DEPLOYMENT_FAILED=1
-                            fi
-
-                        fi
-
-                        # -----------------------------------------
-                        # Deployment successful
-                        # -----------------------------------------
-
-                        if [ "${DEPLOYMENT_FAILED}" -eq 0 ]; then
-
-                            echo ""
-                            echo "========================================"
-                            echo "DEPLOYMENT SUCCESSFUL"
-                            echo "========================================"
-                            echo "Running image: ${NEW_IMAGE}"
-                            echo "========================================"
-
-                            docker ps \
-                              --filter name="${APP_CONTAINER}"
-
-                            exit 0
-
-                        fi
-
-                        # =========================================
-                        # AUTOMATIC ROLLBACK
-                        # =========================================
-
-                        echo ""
-                        echo "========================================"
-                        echo "NEW DEPLOYMENT FAILED"
-                        echo "STARTING AUTOMATIC ROLLBACK"
-                        echo "========================================"
-
-                        echo ""
-                        echo "Failed container logs:"
-
-                        docker logs \
-                          --tail 100 \
-                          "${APP_CONTAINER}" \
-                          2>/dev/null || true
-
-                        echo ""
-                        echo "Removing failed production container..."
-
-                        docker rm -f "${APP_CONTAINER}" \
-                          2>/dev/null || true
-
-                        # -----------------------------------------
-                        # Check previous image
-                        # -----------------------------------------
-
-                        if [ -z "${CURRENT_IMAGE}" ]; then
-
-                            echo ""
-                            echo "CRITICAL ERROR:"
-                            echo "No previous Docker image is available for rollback."
-
-                            exit 1
-
-                        fi
-
-                        echo ""
-                        echo "Rolling back to:"
-                        echo "${CURRENT_IMAGE}"
-
-                        # -----------------------------------------
-                        # Start previous image
-                        # -----------------------------------------
-
-                        if ! docker run -d \
-                          --name "${APP_CONTAINER}" \
-                          --restart unless-stopped \
-                          --env-file /home/nvsk-dev-user/RVSK_administration/.env \
-                          -p 8000:8000 \
-                          "${CURRENT_IMAGE}"
-                        then
-
-                            echo ""
-                            echo "CRITICAL ERROR:"
-                            echo "Failed to start rollback container."
-
-                            exit 1
-
-                        fi
-
-                        # -----------------------------------------
-                        # Verify rollback
-                        # -----------------------------------------
-
-                        echo ""
-                        echo "Verifying rollback deployment..."
-
-                        ROLLBACK_HEALTH_OK=0
-
-                        for i in 1 2 3 4 5 6; do
-
-                            echo "Rollback health check attempt ${i}/6..."
+                            echo "Health check attempt \$i/12"
 
                             if curl \
-                                --fail \
-                                --silent \
-                                --show-error \
-                                http://127.0.0.1:8000/health
-                            then
-                                echo ""
-                                echo "Rollback container is healthy."
-                                ROLLBACK_HEALTH_OK=1
+                              --silent \
+                              --show-error \
+                              --fail \
+                              ${HEALTH_URL} \
+                              >/dev/null; then
+
+                                HEALTHY=true
                                 break
                             fi
 
                             sleep 5
                         done
 
-                        if [ "${ROLLBACK_HEALTH_OK}" -eq 1 ]; then
+                        if [ "\$HEALTHY" = "true" ]; then
 
-                            echo ""
-                            echo "========================================"
-                            echo "ROLLBACK SUCCESSFUL"
-                            echo "========================================"
-                            echo "Restored image: ${CURRENT_IMAGE}"
-                            echo "========================================"
+                            echo "======================================"
+                            echo "Deployment successful"
+                            echo "======================================"
 
-                        else
+                            docker rm -f "\$BACKUP_NAME" \
+                              >/dev/null 2>&1 || true
 
-                            echo ""
-                            echo "========================================"
-                            echo "CRITICAL: ROLLBACK FAILED"
-                            echo "========================================"
-
-                            docker logs \
-                              --tail 100 \
-                              "${APP_CONTAINER}" \
-                              2>/dev/null || true
-
+                            exit 0
                         fi
 
-                        # Jenkins build must remain FAILED because
-                        # the requested new version was not deployed.
-                        exit 1
-                    '
-                '''
-            }
-        }
+                        echo "======================================"
+                        echo "NEW DEPLOYMENT FAILED"
+                        echo "Starting automatic rollback"
+                        echo "======================================"
 
-        // =================================================
-        // 8. VERIFY NGINX ROUTE
-        // =================================================
-        stage('Verify Nginx Route') {
-            steps {
-                sh '''
-                    ssh ${DEPLOY_USER}@${DEPLOY_HOST} '
-                        set -e
+                        echo "Failed container logs:"
+                        docker logs \
+                          --tail 100 \
+                          "\$APP_NAME" || true
 
-                        echo "========================================"
-                        echo "Checking Nginx Administration Route"
-                        echo "========================================"
+                        docker rm -f \
+                          "\$APP_NAME" || true
 
-                        HEALTH_OK=0
+                        if docker inspect \
+                          "\$BACKUP_NAME" \
+                          >/dev/null 2>&1; then
 
-                        for i in 1 2 3 4 5; do
+                            docker rename \
+                              "\$BACKUP_NAME" \
+                              "\$APP_NAME"
 
-                            echo "Nginx health check attempt ${i}/5..."
+                            docker start \
+                              "\$APP_NAME"
+
+                            echo "Waiting for rollback container..."
+
+                            sleep 5
 
                             if curl \
-                                --fail \
-                                --silent \
-                                --show-error \
-                                http://127.0.0.1/administration/health
-                            then
-                                echo ""
-                                echo "Nginx route verification successful."
-                                HEALTH_OK=1
-                                break
+                              --silent \
+                              --show-error \
+                              --fail \
+                              ${HEALTH_URL} \
+                              >/dev/null; then
+
+                                echo "Rollback successful."
+                            else
+                                echo "CRITICAL: Rollback container is unhealthy."
                             fi
 
-                            sleep 3
-                        done
-
-                        if [ "${HEALTH_OK}" -ne 1 ]; then
-
-                            echo ""
-                            echo "ERROR: Nginx route verification failed."
-
-                            exit 1
-
+                        else
+                            echo "CRITICAL: No rollback container available."
                         fi
+
+                        exit 1
                     '
-                '''
+                """
             }
         }
 
-        // =================================================
-        // 9. DOCKER IMAGE CLEANUP
-        // =================================================
-        stage('Docker Image Cleanup') {
+        stage('Verify Deployment') {
             steps {
-                sh '''
+                sh """
                     ssh ${DEPLOY_USER}@${DEPLOY_HOST} '
                         set -e
 
-                        IMAGE_NAME="rvsk-administration"
-                        IMAGES_TO_KEEP=5
+                        echo "===== CONTAINER ====="
+                        docker ps \
+                          --filter name=${APP_NAME}
 
-                        echo "========================================"
-                        echo "Docker Image Cleanup"
-                        echo "========================================"
+                        echo "===== RUNNING IMAGE ====="
+                        docker inspect \
+                          ${APP_NAME} \
+                          --format="{{.Config.Image}}"
 
-                        echo ""
-                        echo "Images before cleanup:"
+                        echo "===== HEALTH ====="
+                        curl --fail \
+                          ${HEALTH_URL}
+
+                        echo
+                        echo "===== NGINX ADMINISTRATION ENDPOINT ====="
+                        curl --fail \
+                          http://127.0.0.1/administration/openapi.json \
+                          >/dev/null
+
+                        echo "Production deployment verified."
+                    '
+                """
+            }
+        }
+
+        stage('Docker Image Cleanup') {
+            steps {
+                sh """
+                    ssh ${DEPLOY_USER}@${DEPLOY_HOST} '
+                        set -e
+
+                        echo "Docker disk usage before cleanup:"
+                        docker system df
+
+                        CURRENT_IMAGE=\$(docker inspect \
+                          --format="{{.Config.Image}}" \
+                          ${APP_NAME})
+
+                        echo "Current running image:"
+                        echo "\$CURRENT_IMAGE"
+
+                        echo "Removing dangling images..."
+                        docker image prune -f
+
+                        echo "Keeping the newest ${KEEP_IMAGES} tagged application images..."
 
                         docker images \
-                          "${IMAGE_NAME}" \
-                          --format "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.CreatedSince}}"
+                          ${IMAGE_NAME} \
+                          --format "{{.Repository}}:{{.Tag}} {{.CreatedAt}}" \
+                          | grep -v ":latest " \
+                          | sort -rk2,3 \
+                          | awk "NR>${KEEP_IMAGES} {print \\\$1}" \
+                          | while read IMAGE; do
 
-                        echo ""
-                        echo "Currently running image:"
-
-                        RUNNING_IMAGE=$(docker inspect \
-                          --format="{{.Config.Image}}" \
-                          rvsk_administration \
-                          2>/dev/null || true)
-
-                        echo "${RUNNING_IMAGE}"
-
-                        echo ""
-                        echo "Keeping the latest ${IMAGES_TO_KEEP} commit-tagged images."
-
-                        # Get image references ordered newest first.
-                        # Exclude the mutable latest tag.
-                        OLD_IMAGES=$(docker images \
-                          "${IMAGE_NAME}" \
-                          --format "{{.Repository}}:{{.Tag}}" \
-                          | grep -v ":latest$" \
-                          | awk "!seen[\\$0]++" \
-                          | tail -n +$((IMAGES_TO_KEEP + 1)) \
-                          || true)
-
-                        if [ -n "${OLD_IMAGES}" ]; then
-
-                            echo ""
-                            echo "Old images selected for cleanup:"
-                            echo "${OLD_IMAGES}"
-
-                            echo "${OLD_IMAGES}" | while read IMAGE; do
-
-                                if [ -z "${IMAGE}" ]; then
-                                    continue
-                                fi
-
-                                # Never remove the image currently used
-                                # by the production container.
-                                if [ "${IMAGE}" = "${RUNNING_IMAGE}" ]; then
-
-                                    echo "Skipping running image: ${IMAGE}"
-
-                                else
-
-                                    echo "Removing old image: ${IMAGE}"
-
-                                    docker image rm "${IMAGE}" \
-                                      2>/dev/null || true
-
+                                if [ "\$IMAGE" != "\$CURRENT_IMAGE" ]; then
+                                    echo "Removing old image: \$IMAGE"
+                                    docker image rm "\$IMAGE" || true
                                 fi
 
                             done
 
-                        else
-
-                            echo ""
-                            echo "No old application images need cleanup."
-
-                        fi
-
-                        echo ""
-                        echo "Removing dangling Docker images..."
-
-                        docker image prune -f
-
-                        echo ""
-                        echo "Images after cleanup:"
-
-                        docker images \
-                          "${IMAGE_NAME}" \
-                          --format "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.CreatedSince}}"
-
-                        echo ""
-                        echo "Docker disk usage:"
-
+                        echo "Docker disk usage after cleanup:"
                         docker system df
                     '
-                '''
+                """
             }
         }
     }
 
-    // =====================================================
-    // POST ACTIONS
-    // =====================================================
     post {
 
         success {
-            echo '========================================'
-            echo 'RVSK Administration deployment SUCCESS'
-            echo '========================================'
-            echo "Build: ${BUILD_NUMBER}"
-            echo "Branch: ${DEPLOY_BRANCH}"
+            echo """
+========================================
+PRODUCTION DEPLOYMENT SUCCESSFUL
+Application : ${APP_NAME}
+Host        : ${DEPLOY_HOST}
+Commit      : ${COMMIT_ID}
+Port        : ${HOST_PORT}
+========================================
+"""
         }
 
         failure {
-            echo '========================================'
-            echo 'RVSK Administration deployment FAILED'
-            echo '========================================'
-            echo 'Check the failed Jenkins stage.'
-            echo 'If deployment itself failed, the pipeline attempted automatic rollback.'
+            echo """
+========================================
+PRODUCTION DEPLOYMENT FAILED
+Check the Jenkins deployment logs.
+Automatic rollback was attempted.
+========================================
+"""
         }
 
         always {
-            echo "Pipeline completed: ${BUILD_TAG}"
+            cleanWs()
         }
     }
 }
