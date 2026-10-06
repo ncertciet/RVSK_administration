@@ -63,7 +63,6 @@ def ingest_school_data(
     # ==========================================================
 
     if not records:
-
         raise HTTPException(
             status_code=400,
             detail={
@@ -77,7 +76,6 @@ def ingest_school_data(
     # ==========================================================
 
     if len(records) > settings.MAX_RECORDS_PER_REQUEST:
-
         raise HTTPException(
             status_code=400,
             detail={
@@ -95,13 +93,19 @@ def ingest_school_data(
     # ==========================================================
 
     try:
+        # ValidationService.validate_payload()
+        # returns:
+        #
+        # (
+        #     valid_records,
+        #     failed_records
+        # )
 
-        validation_result = (
+        valid_records, failed_records = (
             ValidationService.validate_payload(records)
         )
 
     except Exception as ex:
-
         logger.exception(ex)
 
         raise HTTPException(
@@ -111,17 +115,6 @@ def ingest_school_data(
                 "message": "Validation service failed."
             }
         )
-
-    # ==========================================================
-    # EXPECTED VALIDATION RESULT
-    #
-    # valid_records
-    # failed_records
-    # ==========================================================
-
-    valid_records = validation_result["valid_records"]
-
-    failed_records = validation_result["failed_records"]
 
     # ==========================================================
     # STATE VALIDATION
