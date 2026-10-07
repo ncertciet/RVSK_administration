@@ -152,7 +152,6 @@ TABLES = {
 
             "udise_code",
             "academic_year",
-            "actual_teaching_days",
             "total_teachers",
             "total_teachers_male",
             "total_teachers_female",
