@@ -247,19 +247,30 @@ class IngestionService:
 
         # --------------------------------------------------------------
         # Build UPDATE clause.
+        #
+        # On conflict:
+        #   - Update all non-primary-key payload columns.
+        #   - Refresh updated_date using the database timestamp.
+        #   - Never overwrite created_date.
         # --------------------------------------------------------------
         if update_columns:
-            update_sql = sql.SQL(", ").join(
+            update_parts = [
                 sql.SQL("{column} = EXCLUDED.{column}").format(
                     column=sql.Identifier(column)
                 )
                 for column in update_columns
+            ]
+
+            # updated_date is excluded from payload_columns, so set it
+            # explicitly whenever an existing row is updated.
+            update_parts.append(
+                sql.SQL("updated_date = CURRENT_TIMESTAMP")
             )
 
             conflict_action = sql.SQL(
                 "DO UPDATE SET {updates}"
             ).format(
-                updates=update_sql
+                updates=sql.SQL(", ").join(update_parts)
             )
         else:
             # Safety fallback if a table only contains its primary key.
