@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from typing import List, Dict, Any
-
 from app.auth.dependencies import verify_jwt
 from app.services.validation_service import ValidationService
 from app.services.ingestion_service import IngestionService
@@ -105,14 +105,16 @@ def ingest_school_data(
             ValidationService.validate_payload(records)
         )
 
-    except Exception as ex:
-        logger.exception(ex)
+    except Exception:
+        logger.exception("Validation service failed")
 
         raise HTTPException(
             status_code=500,
             detail={
                 "status": "failed",
-                "message": "Validation service failed."
+                "message": "Validation service failed.",
+                "records_received": len(records),
+                "records_ingested": 0
             }
         )
 
@@ -156,7 +158,7 @@ def ingest_school_data(
                     "Payload must contain "
                     "exactly one state_id."
                 ),
-                "payload_states": list(payload_states)
+                "payload_states": sorted(payload_states)
             }
         )
 
@@ -191,36 +193,40 @@ def ingest_school_data(
 
     # ==========================================================
     # NO VALID RECORDS
+    # Return HTTP 422 instead of HTTP 200
     # ==========================================================
 
     if not valid_records:
 
-        return {
-            "status": "failed",
-            "message": (
-                "All records failed validation. "
-                "No data was inserted."
-            ),
+        return JSONResponse(
+            status_code=422,
+            content={
+                "status": "validation_failed",
+                "message": (
+                    "All records failed validation. "
+                    "No data was inserted."
+                ),
 
-            "records_received": len(records),
+                "records_received": len(records),
 
-            "records_valid": 0,
+                "records_valid": 0,
 
-            "records_failed": len(
-                failed_records
-            ),
+                "records_failed": len(
+                    failed_records
+                ),
 
-            "records_ingested": 0,
+                "records_ingested": 0,
 
-            "authenticated_user": {
-                "username": user["username"],
-                "state_id": user["state_id"]
-            },
+                "authenticated_user": {
+                    "username": user["username"],
+                    "state_id": user["state_id"]
+                },
 
-            "tables_updated": {},
+                "tables_updated": {},
 
-            "failed_records": failed_records
-        }
+                "failed_records": failed_records
+            }
+        )
 
     # ==========================================================
     # DATABASE INGESTION
@@ -242,8 +248,8 @@ def ingest_school_data(
             status = "completed_with_errors"
 
             message = (
-                "Administration data processed "
-                "with validation errors."
+                "Valid records were ingested successfully. "
+                "Some records failed validation."
             )
 
         else:
@@ -255,7 +261,11 @@ def ingest_school_data(
                 "successfully."
             )
 
-        return {
+        # ======================================================
+        # RESPONSE BODY
+        # ======================================================
+
+        response_body = {
 
             "status": status,
 
@@ -285,27 +295,48 @@ def ingest_school_data(
 
         }
 
-    except Exception as ex:
+        # ======================================================
+        # PARTIAL SUCCESS
+        # Some records ingested, some failed validation
+        # ======================================================
 
-        logger.exception(ex)
+        if failed_records:
+
+            return JSONResponse(
+                status_code=207,
+                content=response_body
+            )
+
+        # ======================================================
+        # COMPLETE SUCCESS
+        # All records validated and ingestion completed
+        # ======================================================
+
+        return JSONResponse(
+            status_code=200,
+            content=response_body
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Administration data ingestion failed"
+        )
 
         raise HTTPException(
-
             status_code=500,
-
             detail={
-
                 "status": "failed",
-
                 "message": (
                     "Internal ingestion failure. "
-                    "No valid records were processed."
+                    "The ingestion operation did not complete "
+                    "successfully."
                 ),
-
-                "error": (
-                    "Please contact support."
-                )
-
+                "records_received": len(records),
+                "records_valid": len(valid_records),
+                "records_failed": len(failed_records),
+                "records_ingested": 0,
+                "error": "Please contact support."
             }
         )
 
